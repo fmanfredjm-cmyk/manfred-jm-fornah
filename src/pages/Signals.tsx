@@ -27,9 +27,9 @@ const LiveValue = ({ value, prefix = '', suffix = '', className = '' }: { value:
 
   return (
     <span className={cn(
-      "transition-colors duration-300",
-      flash === 'up' ? "text-accent bg-[rgba(16,185,129,0.2)] rounded px-0.5" : 
-      flash === 'down' ? "text-red-400 bg-[rgba(248,113,113,0.2)] rounded px-0.5" : "",
+      "transition-all duration-300",
+      flash === 'up' ? "text-[#10b981] bg-[rgba(16,185,129,0.3)] shadow-[0_0_10px_rgba(16,185,129,0.4)] rounded px-1 -mx-1 font-bold transform scale-105 inline-block" : 
+      flash === 'down' ? "text-[#ef4444] bg-[rgba(239,68,68,0.3)] shadow-[0_0_10px_rgba(239,68,68,0.4)] rounded px-1 -mx-1 font-bold transform scale-105 inline-block" : "inline-block transform scale-100",
       className
     )}>
       {prefix}{value}{suffix}
@@ -37,14 +37,44 @@ const LiveValue = ({ value, prefix = '', suffix = '', className = '' }: { value:
   );
 };
 
-type AlertType = 'ev_threshold' | 'market_prob';
+function PredictionCard({ title, items }: { title: string, items: { label: string, value: string, highlight?: boolean }[] }) {
+  return (
+    <div className="bg-bg-surface-alt border border-border-main rounded-md p-3 hover:border-accent/40 transition-colors duration-300">
+      <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[10px] mb-3 pb-1.5 border-b border-border-main/50">
+        {title}
+      </h4>
+      <div className="space-y-2">
+        {items.map((item, idx) => (
+          <div key={idx} className="flex justify-between items-center">
+            <div className="flex items-center gap-1.5">
+              {item.highlight && parseFloat(item.value) > 50 && (
+                <div className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_8px_rgba(16,185,129,0.5)]"></div>
+              )}
+              <span className={cn(
+                "text-text-dim",
+                item.highlight && "font-medium"
+              )}>{item.label}</span>
+            </div>
+            <span className={cn(
+              "font-mono",
+              item.highlight ? "text-accent font-semibold" : "text-text-main"
+            )}>{item.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type AlertType = 'ev_threshold' | 'market_prob' | 'bookmaker_odds';
 
 interface AlertRule {
   id: string;
   type: AlertType;
   operator: '>=' | '<=';
-  value: number; // For EV, it's % (e.g. 15 for 15%). For Market, it's %.
-  marketPath?: string; // e.g. "corners95.over", only for market_prob
+  value: number; // For EV/Market, it's %. For Bookmaker Odds, it's decimal odds.
+  marketPath?: string; // e.g. "corners95.over", for market_prob and bookmaker_odds
+  bookmaker?: string; // e.g. "Pinnacle", only for bookmaker_odds
 }
 
 interface ToastNotification {
@@ -340,6 +370,20 @@ export default function Signals() {
           if (triggered) {
             message = `${rule.marketPath.replace('.', ' ')} prob hit ${prob}%`;
           }
+        } else if (rule.type === 'bookmaker_odds' && rule.bookmaker) {
+          if (sig.bookmakers && sig.bookmakers.length > 0) {
+            const bIndex = sig.bookmakers.findIndex((b: any) => b.name === rule.bookmaker);
+            if (bIndex !== -1) {
+              const bOdds = parseFloat(sig.bookmakers[bIndex].odds);
+              if (!isNaN(bOdds)) {
+                const op = rule.operator || '>=';
+                triggered = op === '>=' ? bOdds >= rule.value : bOdds <= rule.value;
+                if (triggered) {
+                  message = `${rule.bookmaker} odds for something hit ${bOdds}`; // we don't have the explicit market here since it's just main matchOdds
+                }
+              }
+            }
+          }
         }
 
         if (triggered) {
@@ -470,10 +514,14 @@ export default function Signals() {
                 alertRules.map(rule => (
                   <div key={rule.id} className="flex items-center justify-between p-3 bg-bg-dark border border-border-main rounded-lg text-sm">
                     <div>
-                      {rule.type === 'ev_threshold' ? (
+                      {rule.type === 'ev_threshold' && (
                         <span className="font-semibold text-accent">EV {rule.operator || '>='} {rule.value}%</span>
-                      ) : (
+                      )}
+                      {rule.type === 'market_prob' && (
                         <span><span className="text-zinc-300 font-mono text-[11px]">{rule.marketPath}</span> <span className="font-semibold text-accent">{rule.operator || '>='} {rule.value}%</span></span>
+                      )}
+                      {rule.type === 'bookmaker_odds' && (
+                        <span><span className="text-zinc-300 font-mono text-[11px]">{rule.bookmaker} [{rule.marketPath}]</span> <span className="font-semibold text-accent">{rule.operator || '>='} {rule.value}</span></span>
                       )}
                     </div>
                     <button 
@@ -506,7 +554,8 @@ export default function Signals() {
                     type,
                     operator,
                     value,
-                    ...(type === 'market_prob' ? { marketPath } : {})
+                    ...(type === 'market_prob' || type === 'bookmaker_odds' ? { marketPath } : {}),
+                    ...(type === 'bookmaker_odds' ? { bookmaker: fd.get('bookmaker') as string } : {})
                   };
                   
                   setAlertRules(prev => [...prev, newRule]);
@@ -523,6 +572,8 @@ export default function Signals() {
                   className="w-full bg-bg-dark border border-border-main rounded px-3 py-2 text-sm focus:outline-none focus:border-accent"
                   onChange={(e) => {
                     const marketContainer = e.target.parentElement?.querySelector('.market-select-container');
+                    const bookmakerContainer = e.target.parentElement?.querySelector('.bookmaker-select-container');
+                    const unitLabel = e.target.parentElement?.querySelector('.unit-label');
                     if (marketContainer) {
                        if (e.target.value === 'market_prob') {
                            marketContainer.classList.remove('hidden');
@@ -530,12 +581,38 @@ export default function Signals() {
                            marketContainer.classList.add('hidden');
                        }
                     }
+                    if (bookmakerContainer) {
+                       if (e.target.value === 'bookmaker_odds') {
+                           bookmakerContainer.classList.remove('hidden');
+                       } else {
+                           bookmakerContainer.classList.add('hidden');
+                       }
+                    }
+                    if (unitLabel) {
+                       if (e.target.value === 'bookmaker_odds') {
+                           unitLabel.textContent = 'Dec';
+                       } else {
+                           unitLabel.textContent = '%';
+                       }
+                    }
                   }}
                 >
                   <option value="ev_threshold">Expected Value (EV) Threshold</option>
                   <option value="market_prob">Specific Market Probability</option>
+                  <option value="bookmaker_odds">Specific Bookmaker Odds</option>
                 </select>
                 
+                <div className="flex gap-2">
+                  <div className="w-full bookmaker-select-container hidden">
+                    <select name="bookmaker" className="w-full bg-bg-dark border border-border-main rounded px-3 py-2 text-sm focus:outline-none focus:border-accent">
+                      <option value="Pinnacle">Pinnacle</option>
+                      <option value="Bet365">Bet365</option>
+                      <option value="DraftKings">DraftKings</option>
+                      <option value="FanDuel">FanDuel</option>
+                    </select>
+                  </div>
+                </div>
+
                 <div className="flex gap-2">
                   <div className="w-full market-select-container hidden">
                     <select name="marketPath" className="w-full bg-bg-dark border border-border-main rounded px-3 py-2 text-sm focus:outline-none focus:border-accent">
@@ -567,8 +644,8 @@ export default function Signals() {
                       </select>
                   </div>
                   <div className="relative flex-1">
-                    <input name="value" type="number" step="0.1" placeholder="Threshold Value" className="w-full bg-bg-dark border border-border-main rounded px-3 py-2 text-sm focus:outline-none focus:border-accent appearance-none" required />
-                    <span className="absolute right-3 top-2.5 text-text-dim text-xs">%</span>
+                    <input name="value" type="number" step="0.01" placeholder="Threshold Value" className="w-full bg-bg-dark border border-border-main rounded px-3 py-2 text-sm focus:outline-none focus:border-accent appearance-none" required />
+                    <span className="absolute right-3 top-2.5 text-text-dim text-xs unit-label">%</span>
                   </div>
                 </div>
                 <button type="submit" className="w-full bg-[rgba(16,185,129,0.1)] text-accent border border-accent/20 hover:bg-accent/20 transition-colors py-2 rounded-md font-medium text-sm flex items-center justify-center gap-2">
@@ -717,7 +794,14 @@ export default function Signals() {
                 className="p-4 flex flex-col md:flex-row items-start md:items-center justify-between text-sm gap-4 cursor-pointer hover:bg-bg-surface-alt transition-colors"
               >
                 <div className="flex-[2] font-semibold flex flex-col">
-                  {sig.match}
+                  <div className="flex items-center gap-2">
+                    {sig.match}
+                    {sig.isLive && (
+                      <span className="flex items-center gap-1.5 bg-[#ef4444]/10 text-[#ef4444] border border-[#ef4444]/30 px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider font-bold">
+                        <span className="w-1.5 h-1.5 rounded-full bg-[#ef4444] animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.6)]"></span> IN-PLAY
+                      </span>
+                    )}
+                  </div>
                   <div className="text-[10px] text-text-dim font-mono mt-1.5 font-normal flex items-center gap-3">
                     <span className="bg-bg-dark px-1 py-0.5 rounded text-text-main border border-border-main">{sig.league || 'ENG'}</span>
                     <span>ID: {sig.id.substring(4).toUpperCase()}</span>
@@ -839,74 +923,64 @@ export default function Signals() {
                      </div>
                   )}
 
-                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 text-xs">
-                    <div className="space-y-3">
-                      <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[10px] mb-2 border-b border-border-main pb-1">Match 1X2</h4>
-                      <div className="flex justify-between"><span className="text-text-dim">Home:</span><span className="font-mono text-accent">{sig.predictions.matchOdds.home}</span></div>
-                      <div className="flex justify-between"><span className="text-text-dim">Draw:</span><span className="font-mono">{sig.predictions.matchOdds.draw}</span></div>
-                      <div className="flex justify-between"><span className="text-text-dim">Away:</span><span className="font-mono">{sig.predictions.matchOdds.away}</span></div>
-                    </div>
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 text-xs mt-6">
+                    <PredictionCard title="Match 1X2" items={[
+                      { label: "Home", value: sig.predictions.matchOdds.home, highlight: true },
+                      { label: "Draw", value: sig.predictions.matchOdds.draw },
+                      { label: "Away", value: sig.predictions.matchOdds.away }
+                    ]} />
                     
-                    <div className="space-y-3">
-                      <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[10px] mb-2 border-b border-border-main pb-1">Goals (Over/Under 2.5)</h4>
-                      <div className="flex justify-between"><span className="text-text-dim">Over:</span><span className="font-mono text-accent">{sig.predictions.goals25.over}</span></div>
-                      <div className="flex justify-between"><span className="text-text-dim">Under:</span><span className="font-mono">{sig.predictions.goals25.under}</span></div>
-                    </div>
+                    <PredictionCard title="Goals (Over/Under 2.5)" items={[
+                      { label: "Over", value: sig.predictions.goals25.over, highlight: true },
+                      { label: "Under", value: sig.predictions.goals25.under }
+                    ]} />
 
-                    <div className="space-y-3">
-                      <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[10px] mb-2 border-b border-border-main pb-1">Both Teams To Score</h4>
-                      <div className="flex justify-between"><span className="text-text-dim">Yes:</span><span className="font-mono text-accent">{sig.predictions.btts.yes}</span></div>
-                      <div className="flex justify-between"><span className="text-text-dim">No:</span><span className="font-mono">{sig.predictions.btts.no}</span></div>
-                    </div>
+                    <PredictionCard title="Both Teams To Score" items={[
+                      { label: "Yes", value: sig.predictions.btts.yes, highlight: true },
+                      { label: "No", value: sig.predictions.btts.no }
+                    ]} />
 
-                    <div className="space-y-3">
-                      <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[10px] mb-2 border-b border-border-main pb-1">Double Chance</h4>
-                      <div className="flex justify-between"><span className="text-text-dim">1X:</span><span className="font-mono text-accent">{sig.predictions.doubleChance['1x']}</span></div>
-                      <div className="flex justify-between"><span className="text-text-dim">12:</span><span className="font-mono">{sig.predictions.doubleChance['12']}</span></div>
-                      <div className="flex justify-between"><span className="text-text-dim">X2:</span><span className="font-mono">{sig.predictions.doubleChance['x2']}</span></div>
-                    </div>
+                    <PredictionCard title="Double Chance" items={[
+                      { label: "1X", value: sig.predictions.doubleChance['1x'], highlight: true },
+                      { label: "12", value: sig.predictions.doubleChance['12'] },
+                      { label: "X2", value: sig.predictions.doubleChance['x2'] }
+                    ]} />
 
-                    <div className="space-y-3">
-                      <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[10px] mb-2 border-b border-border-main pb-1">European Handicap (-1, +1)</h4>
-                      <div className="flex justify-between"><span className="text-text-dim">Home (-1):</span><span className="font-mono text-accent">{sig.predictions.euHandicap.home}</span></div>
-                      <div className="flex justify-between"><span className="text-text-dim">Tie (-1):</span><span className="font-mono">{sig.predictions.euHandicap.draw}</span></div>
-                      <div className="flex justify-between"><span className="text-text-dim">Away (+1):</span><span className="font-mono">{sig.predictions.euHandicap.away}</span></div>
-                    </div>
+                    <PredictionCard title="European Handicap (-1, +1)" items={[
+                      { label: "Home (-1)", value: sig.predictions.euHandicap.home, highlight: true },
+                      { label: "Tie (-1)", value: sig.predictions.euHandicap.draw },
+                      { label: "Away (+1)", value: sig.predictions.euHandicap.away }
+                    ]} />
 
-                    <div className="space-y-3">
-                      <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[10px] mb-2 border-b border-border-main pb-1">Team To Score Over 0.5</h4>
-                      <div className="flex justify-between"><span className="text-text-dim">Home:</span><span className="font-mono text-accent">{sig.predictions.teamScore05.home}</span></div>
-                      <div className="flex justify-between"><span className="text-text-dim">Away:</span><span className="font-mono text-accent">{sig.predictions.teamScore05.away}</span></div>
-                    </div>
+                    <PredictionCard title="Team To Score Over 0.5" items={[
+                      { label: "Home", value: sig.predictions.teamScore05.home, highlight: true },
+                      { label: "Away", value: sig.predictions.teamScore05.away, highlight: true }
+                    ]} />
 
-                    <div className="space-y-3">
-                      <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[10px] mb-2 border-b border-border-main pb-1">Corners (Over 9.5)</h4>
-                      <div className="flex justify-between"><span className="text-text-dim">Over:</span><span className="font-mono text-accent">{sig.predictions.corners95.over}</span></div>
-                      <div className="flex justify-between"><span className="text-text-dim">Under:</span><span className="font-mono">{sig.predictions.corners95.under}</span></div>
-                    </div>
+                    <PredictionCard title="Corners (Over 9.5)" items={[
+                      { label: "Over", value: sig.predictions.corners95.over, highlight: true },
+                      { label: "Under", value: sig.predictions.corners95.under }
+                    ]} />
 
-                    <div className="space-y-3">
-                      <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[10px] mb-2 border-b border-border-main pb-1">Cards (Over 3.5)</h4>
-                      <div className="flex justify-between"><span className="text-text-dim">Over:</span><span className="font-mono text-accent">{sig.predictions.cards35.over}</span></div>
-                      <div className="flex justify-between"><span className="text-text-dim">Under:</span><span className="font-mono">{sig.predictions.cards35.under}</span></div>
-                    </div>
+                    <PredictionCard title="Cards (Over 3.5)" items={[
+                      { label: "Over", value: sig.predictions.cards35.over, highlight: true },
+                      { label: "Under", value: sig.predictions.cards35.under }
+                    ]} />
 
                     {sig.predictions.playerProps && (
-                      <div className="space-y-3">
-                        <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[10px] mb-2 border-b border-border-main pb-1">Player Props (Star Player)</h4>
-                        <div className="flex justify-between"><span className="text-text-dim">Anytime Goal:</span><span className="font-mono text-accent">{sig.predictions.playerProps.anytimeGoal}</span></div>
-                        <div className="flex justify-between"><span className="text-text-dim">To Be Carded:</span><span className="font-mono">{sig.predictions.playerProps.carded}</span></div>
-                        <div className="flex justify-between"><span className="text-text-dim">Shots on Target 0.5+:</span><span className="font-mono text-accent">{sig.predictions.playerProps.shotsOnTarget}</span></div>
-                      </div>
+                      <PredictionCard title="Player Props (Star)" items={[
+                        { label: "Anytime Goal", value: sig.predictions.playerProps.anytimeGoal, highlight: true },
+                        { label: "Carded", value: sig.predictions.playerProps.carded },
+                        { label: "Shots on Target", value: sig.predictions.playerProps.shotsOnTarget, highlight: true }
+                      ]} />
                     )}
 
                     {sig.predictions.inPlay && (
-                      <div className="space-y-3">
-                        <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[10px] mb-2 border-b border-border-main pb-1">In-Play Projection</h4>
-                        <div className="flex justify-between"><span className="text-text-dim">Next Goal (Home):</span><span className="font-mono text-accent">{sig.predictions.inPlay.nextGoal.home}</span></div>
-                        <div className="flex justify-between"><span className="text-text-dim">Next Goal (Away):</span><span className="font-mono">{sig.predictions.inPlay.nextGoal.away}</span></div>
-                        <div className="flex justify-between"><span className="text-text-dim">Next Goal (None):</span><span className="font-mono">{sig.predictions.inPlay.nextGoal.none}</span></div>
-                      </div>
+                      <PredictionCard title="In-Play Projection" items={[
+                        { label: "Next Goal (Home)", value: sig.predictions.inPlay.nextGoal.home, highlight: true },
+                        { label: "Next Goal (Away)", value: sig.predictions.inPlay.nextGoal.away },
+                        { label: "Next Goal (None)", value: sig.predictions.inPlay.nextGoal.none }
+                      ]} />
                     )}
                   </div>
 
@@ -987,60 +1061,106 @@ export default function Signals() {
                     )}
                   </div>
 
-                  {sig.oddsHistory && sig.oddsHistory.length > 1 && (
-                    <div className="border-t border-border-main pt-6">
-                      <div className="flex items-center justify-between mb-4">
-                        <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[11px] flex items-center gap-2">
-                          <Activity className="w-4 h-4 text-accent" /> Detailed Odds History (Main Market)
-                        </h4>
-                        <div className="flex gap-4">
-                          <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-accent opacity-50"></div><span className="text-[10px] text-text-dim font-mono">Price Action</span></div>
-                          <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-[#f87171]"></div><span className="text-[10px] text-text-dim font-mono">Volatile Move</span></div>
-                        </div>
-                      </div>
+                  {/* H2H and Historical Charts Row */}
+                  <div className="border-t border-border-main pt-5 mt-5">
+                    <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-6">
                       
-                      <div className="w-full h-[250px] bg-bg-dark rounded-xl border border-border-main p-4 pt-6 relative">
-                        {(() => {
-                           const cData = sig.oddsHistory.map((val: number, i: number, arr: number[]) => {
-                             const prev = i > 0 ? arr[i-1] : val;
-                             const diff = val - prev;
-                             const isSignificant = Math.abs(diff) >= 0.03; // ~3 cent swing threshold
-                             return {
-                               time: `T-${arr.length - i}`,
-                               odds: val,
-                               eventLabel: isSignificant ? (diff > 0 ? 'Surge' : 'Drop') : null,
-                               eventValue: isSignificant ? val : null,
-                             };
-                           });
-                           
-                           return (
-                             <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-                               <ComposedChart data={cData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                                 <defs>
-                                   <linearGradient id={`gradient_${sig.id}`} x1="0" y1="0" x2="0" y2="1">
-                                     <stop offset="5%" stopColor="var(--color-accent)" stopOpacity={0.4}/>
-                                     <stop offset="95%" stopColor="var(--color-accent)" stopOpacity={0}/>
-                                   </linearGradient>
-                                 </defs>
-                                 <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-main)" vertical={false} />
-                                 <XAxis dataKey="time" stroke="var(--color-text-dim)" fontSize={10} tickLine={false} axisLine={false} />
-                                 <YAxis domain={['dataMin - 0.1', 'dataMax + 0.1']} stroke="var(--color-text-dim)" fontSize={10} tickLine={false} axisLine={false} orientation="right" tickFormatter={(v) => v.toFixed(2)} />
-                                 <Tooltip 
-                                   contentStyle={{ backgroundColor: 'var(--color-bg-surface-alt)', border: '1px solid var(--color-border-main)', borderRadius: '8px', fontSize: '11px' }}
-                                   itemStyle={{ color: 'var(--color-accent)', fontWeight: 'bold' }}
-                                   cursor={{ stroke: 'var(--color-text-dim)', strokeWidth: 1, strokeDasharray: '3 3' }}
-                                   formatter={(value: number, name: string) => [value.toFixed(3), name === 'eventValue' ? 'Volatility Marker' : 'Odds Value']}
-                                   labelStyle={{ color: 'var(--color-text-dim)' }}
-                                 />
-                                 <Area type="stepAfter" dataKey="odds" fill={`url(#gradient_${sig.id})`} stroke="var(--color-accent)" strokeWidth={2} isAnimationActive={false} />
-                                 <Scatter dataKey="eventValue" fill="#f87171" isAnimationActive={false} />
-                               </ComposedChart>
-                             </ResponsiveContainer>
-                           );
-                        })()}
+                      {/* H2H Stats */}
+                      {sig.h2h && (
+                        <div>
+                          <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[11px] mb-3 flex items-center gap-2">
+                             <Activity className="w-4 h-4 text-text-main" /> Head-to-Head (H2H) Stats
+                          </h4>
+                          <div className="bg-bg-surface border border-border-main rounded-md p-4 text-sm">
+                             <div className="grid grid-cols-3 text-center mb-4 pb-4 border-b border-border-main">
+                                <div>
+                                   <div className="text-xl font-bold text-text-main">{sig.h2h.homeWins}</div>
+                                   <div className="text-[10px] text-text-dim uppercase tracking-wider mt-1">{sig.home} Wins</div>
+                                </div>
+                                <div className="border-x border-border-main">
+                                   <div className="text-xl font-bold text-text-main">{sig.h2h.draws}</div>
+                                   <div className="text-[10px] text-text-dim uppercase tracking-wider mt-1">Draws</div>
+                                </div>
+                                <div>
+                                   <div className="text-xl font-bold text-text-main">{sig.h2h.awayWins}</div>
+                                   <div className="text-[10px] text-text-dim uppercase tracking-wider mt-1">{sig.away} Wins</div>
+                                </div>
+                             </div>
+
+                             <div className="flex justify-between items-center mb-4">
+                                <span className="text-text-dim">Avg Goals in Matchups</span>
+                                <span className="font-mono font-bold text-accent">{sig.h2h.avgGoals}</span>
+                             </div>
+
+                             <div>
+                                <span className="text-[10px] text-text-dim uppercase tracking-wider mb-2 block">Recent Meetings</span>
+                                <div className="flex flex-col gap-2">
+                                  {(sig.h2h.recentMatches || []).map((m: any, i: number) => (
+                                    <div key={i} className="flex justify-between items-center bg-bg-dark rounded px-2 py-1.5 text-xs border border-border-main">
+                                      <span className="font-mono text-text-dim">{m.date}</span>
+                                      <span className="text-text-main">{m.result}</span>
+                                      <span className="font-bold font-mono">{m.score}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                             </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Charts */}
+                      <div className="flex flex-col gap-4">
+                        {sig.oddsHistory && sig.oddsHistory.length > 1 && (
+                          <div>
+                            <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[11px] mb-3 flex items-center gap-2">
+                              <Activity className={cn("w-4 h-4", sig.isLive ? "text-[#ef4444]" : "text-accent")} /> 
+                              {sig.isLive ? (
+                                 <span className="text-text-main flex items-center gap-2">Primary Market Odds History <span className="bg-[#ef4444]/10 text-[#ef4444] px-1.5 py-0.5 rounded text-[9px] font-bold tracking-widest">(IN-PLAY LIVE)</span></span>
+                              ) : (
+                                 "Primary Market Odds History (Home Win)"
+                              )}
+                            </h4>
+                            <div className="w-full h-[120px] bg-bg-surface border border-border-main rounded-md p-3">
+                              <ResponsiveContainer width="100%" height="100%">
+                                <LineChart data={sig.oddsHistory.map((val: number, i: number) => ({ time: i, odds: val }))}>
+                                  <CartesianGrid strokeDasharray="2 2" stroke="var(--color-border-main)" vertical={false} />
+                                  <YAxis domain={['auto', 'auto']} stroke="var(--color-text-dim)" fontSize={10} width={30} tickLine={false} axisLine={false} tickFormatter={(v) => v.toFixed(2)} />
+                                  <Tooltip 
+                                    contentStyle={{ backgroundColor: 'var(--color-bg-surface-alt)', border: '1px solid var(--color-border-main)', borderRadius: '4px', fontSize: '10px' }}
+                                    itemStyle={{ color: sig.isLive ? '#ef4444' : 'var(--color-accent)' }}
+                                  />
+                                  <Line type="stepAfter" dataKey="odds" stroke={sig.isLive ? "#ef4444" : "var(--color-accent)"} strokeWidth={2} dot={false} isAnimationActive={false} />
+                                </LineChart>
+                              </ResponsiveContainer>
+                            </div>
+                          </div>
+                        )}
+
+                        {sig.kellyHistory && sig.kellyHistory.length > 1 && (
+                          <div>
+                            <h4 className="font-semibold text-text-dim uppercase tracking-wider text-[11px] mb-3 flex items-center gap-2">
+                              <Activity className="w-4 h-4 text-cyan-500" /> 
+                              Kelly Fraction History
+                            </h4>
+                            <div className="w-full h-[120px] bg-bg-surface border border-border-main rounded-md p-3">
+                              <ResponsiveContainer width="100%" height="100%">
+                                <LineChart data={sig.kellyHistory.map((val: number, i: number) => ({ time: i, kelly: val }))}>
+                                  <CartesianGrid strokeDasharray="2 2" stroke="var(--color-border-main)" vertical={false} />
+                                  <YAxis domain={['auto', 'auto']} stroke="var(--color-text-dim)" fontSize={10} width={40} tickLine={false} axisLine={false} tickFormatter={(v) => (v * 100).toFixed(1) + '%'} />
+                                  <Tooltip 
+                                    contentStyle={{ backgroundColor: 'var(--color-bg-surface-alt)', border: '1px solid var(--color-border-main)', borderRadius: '4px', fontSize: '10px' }}
+                                    itemStyle={{ color: '#06b6d4' }}
+                                    formatter={(v: any) => [(v * 100).toFixed(2) + '%', 'Kelly']}
+                                  />
+                                  <Line type="monotone" dataKey="kelly" stroke="#06b6d4" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                </LineChart>
+                              </ResponsiveContainer>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
-                  )}
+                  </div>
                 </div>
               )}
             </div>
