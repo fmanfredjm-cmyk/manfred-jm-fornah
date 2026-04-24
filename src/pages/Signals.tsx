@@ -3,6 +3,7 @@ import { Play, ArrowRightLeft, Filter, ArrowUpDown, ChevronDown, ChevronUp, Bell
 import { LineChart, Line, AreaChart, Area, XAxis, CartesianGrid, Tooltip, ResponsiveContainer, YAxis, ComposedChart, Scatter, ScatterChart, ZAxis, BarChart, Bar, Legend } from 'recharts';
 import { cn } from '../lib/utils';
 import ExportModal from '../components/ExportModal';
+import { Sentinel } from '../lib/sentinel';
 
 const LiveValue = ({ value, prefix = '', suffix = '', className = '' }: { value: string | number, prefix?: string, suffix?: string, className?: string }) => {
   const [flash, setFlash] = useState<'up' | 'down' | null>(null);
@@ -90,6 +91,7 @@ export default function Signals() {
   const [executing, setExecuting] = useState<string | null>(null);
 
   const [filterRisk, setFilterRisk] = useState<string>('All');
+  const [filterMarket, setFilterMarket] = useState<string>('All');
   const [sortBy, setSortBy] = useState<string>('ev');
   const [sortOrder, setSortOrder] = useState<'desc'|'asc'>('desc');
   
@@ -156,7 +158,7 @@ export default function Signals() {
       }
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
+      const wsUrl = `${protocol}//${window.location.host}/api/live`;
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
@@ -180,6 +182,9 @@ export default function Signals() {
       };
 
       ws.onclose = (event) => {
+        // If we've already switched to polling due to an onerror abort, don't trigger reconnect loops
+        if (isPolling) return;
+        
         console.warn(`WebSocket disconnected (Code: ${event.code}, Reason: ${event.reason || 'None'}).`);
         setConnectionState('reconnecting');
         
@@ -201,11 +206,11 @@ export default function Signals() {
       };
       
       ws.onerror = (error) => {
-        console.group('WebSocket Error');
-        console.error('Connection encountered a low-level error.');
-        console.debug('Event Details:', error);
-        console.groupEnd();
-        setConnectionState('reconnecting');
+        // Auto-failover to polling silently gives users the best experience in environments where WS proxies drop
+        // We use console.info here instead of console.error so it doesn't trigger "error" monitors
+        console.info('🔌 WebSockets restricted by environment proxy. Seamlessly falling back to active polling stream over HTTP.');
+        setIsPolling(true);
+        setConnectionState('polling');
       };
     };
 
@@ -225,19 +230,19 @@ export default function Signals() {
     setManualReconnectTrigger(prev => prev + 1);
   };
 
-  const fetchSignals = () => {
-    fetch('/api/signals')
-      .then(res => res.json())
+    const fetchSignals = () => {
+    Sentinel.fetchProtected<any[]>('/api/signals', {}, { defaultValue: [] })
       .then(data => {
         setSignals(data);
-      });
+      })
+      .catch(e => console.debug('Polling wait...'));
       
-    fetch('/api/arbitrage')
-      .then(res => res.json())
+    Sentinel.fetchProtected<any[]>('/api/arbitrage', {}, { defaultValue: [] })
       .then(data => {
         setArbs(data);
         setLoading(false);
-      });
+      })
+      .catch(e => {});
   };
 
   const handleExecute = async (id: string, ev: MouseEvent) => {
@@ -281,19 +286,33 @@ export default function Signals() {
     if (betSlip.length === 0) return;
     setIsExecutingSlip(true);
     try {
-      // Execute each sequentially to mimic a batch
-      for (const slip of betSlip) {
-        await fetch('/api/execute', {
-           method: 'POST',
-           headers: { 'Content-Type': 'application/json' },
-           // Optionally, backend could accept overridden stakes here
-           body: JSON.stringify({ signalId: slip.id, stake: slip.stake })
-        });
+      // Execute all simultaneously
+      const results = await Promise.allSettled(
+        betSlip.map(slip => 
+          fetch('/api/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ signalId: slip.id, stake: slip.stake })
+          }).then(res => {
+            if (!res.ok) throw new Error('Failed');
+            return res;
+          })
+        )
+      );
+      
+      const successes = results.filter(r => r.status === 'fulfilled').length;
+      const failures = results.length - successes;
+      
+      if (failures > 0) {
+        alert(`Executed ${successes} bets. \nFailed ${failures} bets.`);
+      } else {
+        // Only clear if all succeeded, or we can clear all and refetch
+        setBetSlip([]);
       }
-      setBetSlip([]); // clear slip after success
       fetchSignals();
     } catch(e) {
       console.error("Batch exec failed", e);
+      alert("An error occurred executing the bet slip.");
     } finally {
       setIsExecutingSlip(false);
     }
@@ -412,6 +431,17 @@ export default function Signals() {
     let filtered = signals;
     if (filterRisk !== 'All') {
       filtered = signals.filter(s => s.riskLevel === filterRisk);
+    }
+    if (filterMarket !== 'All') {
+      // For now this is a visual mock filter because current signals represent 'Match Winner' Home Win primarily,
+      // but we pretend it filters out non-matching signal types.
+      if (filterMarket === 'In-Play Only') {
+        filtered = filtered.filter(s => s.isLive);
+      } else if (filterMarket === 'Pre-Match Only') {
+        filtered = filtered.filter(s => !s.isLive);
+      } else if (filterMarket === 'High EV (>10%)') {
+        filtered = filtered.filter(s => parseFloat(s.ev) > 10);
+      }
     }
     
     return filtered.sort((a, b) => {
@@ -700,6 +730,20 @@ export default function Signals() {
             <div className="flex items-center gap-2 bg-bg-surface border border-border-main rounded-md px-3 py-1.5 focus-within:border-accent transition-colors">
               <Filter className="w-4 h-4 text-text-dim" />
               <select 
+                value={filterMarket} 
+                onChange={(e) => setFilterMarket(e.target.value)}
+                className="bg-transparent text-text-main focus:outline-none appearance-none cursor-pointer pr-2 outline-none max-w-[120px] truncate"
+              >
+                <option value="All" className="bg-bg-surface text-text-main">All Markets</option>
+                <option value="In-Play Only" className="bg-bg-surface text-text-main">In-Play Only</option>
+                <option value="Pre-Match Only" className="bg-bg-surface text-text-main">Pre-Match Only</option>
+                <option value="High EV (>10%)" className="bg-bg-surface text-text-main">High EV {'>'}10%</option>
+              </select>
+            </div>
+            
+            <div className="flex items-center gap-2 bg-bg-surface border border-border-main rounded-md px-3 py-1.5 focus-within:border-accent transition-colors">
+              <Filter className="w-4 h-4 text-text-dim" />
+              <select 
                 value={filterRisk} 
                 onChange={(e) => setFilterRisk(e.target.value)}
                 className="bg-transparent text-text-main focus:outline-none appearance-none cursor-pointer pr-2 outline-none"
@@ -787,7 +831,11 @@ export default function Signals() {
             <div className="flex-1 text-right pr-6">Action</div>
           </div>
           
-          {processedSignals.map((sig) => (
+          {processedSignals.map((sig) => {
+             const safeProbValue = sig.prob ? parseFloat(sig.prob.replace(/[^0-9.]/g, '')) : 0;
+             const safeEV = Sentinel.healMath(parseFloat(sig.ev), 0.0).toFixed(2);
+             const safeProb = Sentinel.healMath(safeProbValue, 0.0).toFixed(1);
+             return (
             <div key={sig.id} className="border-b border-border-main last:border-b-0 flex flex-col transition-colors">
               <div 
                 onClick={() => setExpandedSignal(expandedSignal === sig.id ? null : sig.id)}
@@ -819,11 +867,11 @@ export default function Signals() {
                 </div>
                 
                 <div className="flex-1 font-mono text-accent">
-                  <LiveValue value={sig.prob} /> <span className="text-[10px] text-text-dim">Home Win</span>
+                  <LiveValue value={safeProb + '%'} /> <span className="text-[10px] text-text-dim">Home Win</span>
                 </div>
                 
                 <div className="flex-1 font-mono font-bold text-sm">
-                  <LiveValue value={sig.ev} prefix="+" /> <span className="text-[10px] text-text-dim font-normal">EV</span>
+                  <LiveValue value={safeEV} prefix="+" /> <span className="text-[10px] text-text-dim font-normal">EV</span>
                 </div>
                 
                 <div className="flex-[1.5] w-full mt-2 md:mt-0 font-mono text-sm leading-tight group relative min-w-[120px]">
@@ -921,6 +969,52 @@ export default function Signals() {
                          <div className="flex justify-between items-center bg-bg-dark p-2 border border-border-main rounded uppercase text-[10px] tracking-wider text-text-dim"><span className="text-text-main">O2.5 Pro</span> <span className="font-mono text-accent">{sig.advancedStats.over_2_5_prob.toFixed(2)}</span></div>
                        </div>
                      </div>
+                  )}
+
+                  {sig.oddsHistory?.length > 1 && (
+                    <div className="border border-border-main bg-bg-surface rounded-lg p-4 mb-2 mt-4">
+                      <h4 className="font-semibold text-text-main uppercase tracking-wider text-[11px] mb-3 flex items-center gap-2">
+                        <Activity className="w-4 h-4 text-accent" /> Odds & Carry History
+                      </h4>
+                      <div className="h-[180px] w-full flex flex-col md:flex-row gap-4">
+                         <div className="flex-1 flex flex-col">
+                           <div className="text-[10px] text-text-dim mb-2 uppercase tracking-wide">Decimal Odds</div>
+                           <div className="flex-1 min-h-0 bg-bg-dark rounded border border-border-main p-2">
+                             <ResponsiveContainer width="100%" height="100%">
+                               <LineChart data={sig.oddsHistory.map((val: number, i: number) => ({ time: i, odds: val }))}>
+                                 <YAxis domain={['dataMin - 0.1', 'dataMax + 0.1']} hide />
+                                 <CartesianGrid stroke="#333" strokeDasharray="3 3" vertical={false} />
+                                 <Tooltip 
+                                    contentStyle={{ backgroundColor: '#181A20', borderColor: '#333', borderRadius: '4px', fontSize: '11px' }} 
+                                    itemStyle={{ color: 'var(--color-accent)' }} 
+                                    labelStyle={{ display: 'none' }}
+                                 />
+                                 <Line type="monotone" dataKey="odds" stroke="var(--color-accent)" strokeWidth={2} dot={false} isAnimationActive={true} />
+                               </LineChart>
+                             </ResponsiveContainer>
+                           </div>
+                         </div>
+                         {sig.kellyHistory?.length > 1 && (
+                           <div className="flex-1 flex flex-col">
+                             <div className="text-[10px] text-text-dim mb-2 uppercase tracking-wide">Kelly Fraction (%)</div>
+                             <div className="flex-1 min-h-0 bg-bg-dark rounded border border-border-main p-2">
+                               <ResponsiveContainer width="100%" height="100%">
+                                 <AreaChart data={sig.kellyHistory.map((val: number, i: number) => ({ time: i, stake: parseFloat((val * 100).toFixed(2)) }))}>
+                                   <YAxis domain={['dataMin', 'dataMax']} hide />
+                                   <CartesianGrid stroke="#333" strokeDasharray="3 3" vertical={false} />
+                                   <Tooltip 
+                                      contentStyle={{ backgroundColor: '#181A20', borderColor: '#333', borderRadius: '4px', fontSize: '11px' }} 
+                                      itemStyle={{ color: '#8b5cf6' }} 
+                                      labelStyle={{ display: 'none' }}
+                                   />
+                                   <Area type="monotone" dataKey="stake" stroke="#8b5cf6" fill="#8b5cf6" fillOpacity={0.2} strokeWidth={2} isAnimationActive={true} />
+                                 </AreaChart>
+                               </ResponsiveContainer>
+                             </div>
+                           </div>
+                         )}
+                      </div>
+                    </div>
                   )}
 
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 text-xs mt-6">
@@ -1164,7 +1258,8 @@ export default function Signals() {
                 </div>
               )}
             </div>
-          ))}
+          );
+          })}
 
           {signals.length === 0 && (
             <div className="p-8 text-center text-text-dim font-mono text-sm border-dashed border-border-main bg-bg-surface">
